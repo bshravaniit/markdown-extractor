@@ -1,0 +1,5 @@
+{
+  "name": "Markdown Extractor",
+  "description": "Intelligent document-to-markdown converter for AI workflows. Supports PDF, DOCX, XLSX, PPTX, and CSV.",
+  "requestFramePermissions": []
+}

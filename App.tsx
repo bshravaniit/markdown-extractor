@@ -1,158 +1,209 @@
-import React, { useState, useCallback } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import Dropzone from './components/Dropzone';
-import FileList from './components/FileList';
-import MarkdownPreview from './components/MarkdownPreview';
-import { ProcessedFile, FileStatus } from './types';
-import { processFile } from './services/fileParser';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Prospect, Volunteer, ProspectStatus, OutreachDraft } from './types';
+import { getSeedProspects } from './data/localProspects';
+import ProspectsTab from './components/ProspectsTab';
+import EventInfoTab from './components/EventInfoTab';
+import CRMTab from './components/CRMTab';
+import VolunteersTab from './components/VolunteersTab';
 
-const App: React.FC = () => {
-  const [files, setFiles] = useState<ProcessedFile[]>([]);
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
+type Tab = 'prospects' | 'crm' | 'event' | 'volunteers';
 
-  const determineFileType = (name: string): ProcessedFile['type'] => {
-    const ext = name.split('.').pop()?.toLowerCase() || '';
-    if (['pdf'].includes(ext)) return 'pdf';
-    if (['docx', 'doc'].includes(ext)) return 'docx';
-    if (['xlsx', 'xls'].includes(ext)) return 'xlsx';
-    if (['pptx', 'ppt'].includes(ext)) return 'pptx';
-    if (['csv'].includes(ext)) return 'csv';
-    return 'other';
-  };
+const STORAGE_KEY_PROSPECTS = 'jw_prospects_v1';
+const STORAGE_KEY_VOLUNTEERS = 'jw_volunteers_v1';
 
-  const handleFilesAdded = useCallback((newFiles: File[]) => {
-    const newProcessedFiles: ProcessedFile[] = newFiles.map(file => ({
-      id: uuidv4(),
-      file,
-      status: FileStatus.IDLE,
-      originalName: file.name,
-      markdown: '',
-      type: determineFileType(file.name)
-    }));
+const GOAL = 2000;
 
-    setFiles(prev => [...prev, ...newProcessedFiles]);
-    
-    // Auto-select first new file if none selected
-    if (!selectedFileId && newProcessedFiles.length > 0) {
-      setSelectedFileId(newProcessedFiles[0].id);
-    }
+function loadFromStorage<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
-    // Start processing queue
-    newProcessedFiles.forEach(fileItem => {
-      processFileItem(fileItem.id, fileItem.file);
-    });
-  }, [selectedFileId]);
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('prospects');
+  const [prospects, setProspects] = useState<Prospect[]>(() => {
+    const saved = loadFromStorage<Prospect[] | null>(STORAGE_KEY_PROSPECTS, null);
+    if (saved && saved.length > 0) return saved;
+    return getSeedProspects();
+  });
+  const [volunteers, setVolunteers] = useState<Volunteer[]>(() =>
+    loadFromStorage<Volunteer[]>(STORAGE_KEY_VOLUNTEERS, [])
+  );
 
-  const processFileItem = async (id: string, file: File) => {
-    // Update status to processing
-    setFiles(prev => prev.map(f => f.id === id ? { ...f, status: FileStatus.PARSING } : f));
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY_PROSPECTS, JSON.stringify(prospects)); } catch {}
+  }, [prospects]);
 
-    try {
-      // 1. Parse File & 2. Send to Gemini (Handled in service)
-      const markdown = await processFile(file);
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY_VOLUNTEERS, JSON.stringify(volunteers)); } catch {}
+  }, [volunteers]);
 
-      setFiles(prev => prev.map(f => 
-        f.id === id 
-          ? { ...f, status: FileStatus.COMPLETED, markdown } 
-          : f
-      ));
-    } catch (error: any) {
-      console.error(`Error processing file ${file.name}:`, error);
-      setFiles(prev => prev.map(f => 
-        f.id === id 
-          ? { ...f, status: FileStatus.ERROR, error: error.message || "Failed to process" } 
-          : f
-      ));
-    }
-  };
+  // ── Prospect mutations ──────────────────────────────────────────────
+  const updateProspects = useCallback((updated: Prospect[]) => setProspects(updated), []);
 
-  const handleDelete = (id: string) => {
-    setFiles(prev => prev.filter(f => f.id !== id));
-    if (selectedFileId === id) {
-      setSelectedFileId(null);
-    }
-  };
+  const updateStatus = useCallback((id: string, status: ProspectStatus, headcount?: number) => {
+    setProspects(prev => prev.map(p => p.id === id
+      ? {
+          ...p,
+          status,
+          headcountPledged: headcount !== undefined ? headcount : p.headcountPledged,
+          lastContact: status === 'contacted' ? new Date().toISOString() : p.lastContact,
+        }
+      : p
+    ));
+  }, []);
 
-  const selectedFile = files.find(f => f.id === selectedFileId);
+  const updateNotes = useCallback((id: string, notes: string) => {
+    setProspects(prev => prev.map(p => p.id === id ? { ...p, notes } : p));
+  }, []);
+
+  const saveDraft = useCallback((prospectId: string, draft: OutreachDraft) => {
+    setProspects(prev => prev.map(p =>
+      p.id === prospectId
+        ? { ...p, outreachDrafts: [...p.outreachDrafts, draft] }
+        : p
+    ));
+  }, []);
+
+  const assignVolunteer = useCallback((prospectId: string, volunteerId: string) => {
+    setProspects(prev => prev.map(p =>
+      p.id === prospectId ? { ...p, assignedVolunteerId: volunteerId || undefined } : p
+    ));
+  }, []);
+
+  // ── Volunteer mutations ──────────────────────────────────────────────
+  const addVolunteer = useCallback((v: Volunteer) => setVolunteers(prev => [...prev, v]), []);
+
+  const deleteVolunteer = useCallback((id: string) => {
+    setVolunteers(prev => prev.filter(v => v.id !== id));
+    setProspects(prev => prev.map(p => p.assignedVolunteerId === id ? { ...p, assignedVolunteerId: undefined } : p));
+  }, []);
+
+  const unassignProspect = useCallback((prospectId: string) => {
+    setProspects(prev => prev.map(p => p.id === prospectId ? { ...p, assignedVolunteerId: undefined } : p));
+  }, []);
+
+  // ── Summary stats for header ─────────────────────────────────────────
+  const totalPledged = prospects
+    .filter(p => p.status === 'committed' || p.status === 'converted')
+    .reduce((s, p) => s + (p.headcountPledged ?? 0), 0);
+  const inPipeline = prospects.filter(p => p.status !== 'new').length;
+  const progressPct = Math.min(100, Math.round((totalPledged / GOAL) * 100));
+
+  const TAB_CONFIG = [
+    { id: 'prospects' as Tab, label: 'Prospects', icon: 'ph-buildings', badge: prospects.filter(p => p.status === 'new').length },
+    { id: 'crm' as Tab, label: 'Tracker / CRM', icon: 'ph-kanban', badge: inPipeline },
+    { id: 'event' as Tab, label: 'Event Info', icon: 'ph-info', badge: 0 },
+    { id: 'volunteers' as Tab, label: 'Volunteers', icon: 'ph-users-three', badge: volunteers.length },
+  ];
 
   return (
-    <div className="flex h-screen w-full bg-gray-50 text-gray-900 font-sans">
-      {/* Sidebar */}
-      <div className="w-80 border-r border-gray-200 bg-white flex flex-col z-20 shadow-lg">
-        <div className="p-6 border-b border-gray-200 bg-white">
-          <div className="flex items-center gap-3 text-indigo-600 mb-1">
-            <i className="ph ph-magic-wand text-3xl"></i>
-            <h1 className="text-xl font-bold tracking-tight text-gray-900">Markdown Extractor</h1>
+    <div className="flex flex-col h-screen bg-gray-50 overflow-hidden">
+      {/* Header */}
+      <header className="bg-white border-b border-gray-200 shadow-sm z-20 flex-shrink-0">
+        <div className="flex items-center justify-between px-5 py-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center text-white text-lg font-bold shadow-md select-none">
+              ☯
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-gray-900 leading-tight">The Journey Within</h1>
+              <p className="text-xs text-gray-500 leading-tight">Gurudev Sri Sri Ravi Shankar · Battle Creek · Jul 9, 2025</p>
+            </div>
           </div>
-          <p className="text-xs text-gray-500 font-medium ml-1">Universal Document to Markdown</p>
+
+          <div className="hidden sm:flex items-center gap-3 bg-violet-50 border border-violet-100 rounded-xl px-4 py-2">
+            <div className="text-right">
+              <p className="text-xs text-violet-500 font-medium uppercase tracking-wider">Headcount Pledged</p>
+              <p className="text-lg font-black text-violet-700 leading-tight">
+                {totalPledged.toLocaleString()} <span className="text-sm font-normal text-violet-400">/ {GOAL.toLocaleString()}</span>
+              </p>
+            </div>
+            <div className="w-20 h-2 bg-violet-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-violet-500 to-green-500 rounded-full transition-all duration-500"
+                style={{ width: `${progressPct}%` }}
+              ></div>
+            </div>
+            <span className="text-sm font-bold text-gray-700">{progressPct}%</span>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-hidden p-4 flex flex-col gap-6">
-          <Dropzone 
-            onFilesAdded={handleFilesAdded} 
-            isDragging={isDragging}
-            setIsDragging={setIsDragging}
-          />
-          
-          <div className="flex-1 min-h-0 flex flex-col">
-            <div className="flex items-center justify-between mb-3 px-1">
-              <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                Files ({files.length})
-              </h2>
-              {files.length > 0 && (
-                <button 
-                   onClick={() => { setFiles([]); setSelectedFileId(null); }}
-                   className="text-xs text-gray-400 hover:text-red-500 transition-colors"
-                >
-                  Clear All
-                </button>
+        {/* Tabs */}
+        <nav className="flex border-t border-gray-100">
+          {TAB_CONFIG.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors border-b-2 whitespace-nowrap ${
+                activeTab === tab.id
+                  ? 'border-violet-600 text-violet-700 bg-violet-50/50'
+                  : 'border-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50'
+              }`}
+            >
+              <i className={`ph ${tab.icon}`}></i>
+              <span>{tab.label}</span>
+              {tab.badge > 0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${
+                  activeTab === tab.id ? 'bg-violet-600 text-white' : 'bg-gray-200 text-gray-600'
+                }`}>
+                  {tab.badge}
+                </span>
               )}
-            </div>
-            <FileList 
-              files={files} 
-              selectedId={selectedFileId} 
-              onSelect={setSelectedFileId}
-              onDelete={handleDelete}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {/* Main content */}
+      <main className="flex-1 overflow-hidden">
+        {activeTab === 'prospects' && (
+          <ProspectsTab
+            prospects={prospects}
+            volunteers={volunteers}
+            onUpdateProspects={updateProspects}
+            onUpdateStatus={updateStatus}
+            onSaveDraft={saveDraft}
+            onAssignVolunteer={assignVolunteer}
+          />
+        )}
+        {activeTab === 'crm' && (
+          <CRMTab
+            prospects={prospects}
+            volunteers={volunteers}
+            onUpdateStatus={updateStatus}
+            onUpdateNotes={updateNotes}
+          />
+        )}
+        {activeTab === 'event' && (
+          <div className="h-full overflow-y-auto">
+            <EventInfoTab />
+          </div>
+        )}
+        {activeTab === 'volunteers' && (
+          <div className="h-full overflow-y-auto">
+            <VolunteersTab
+              volunteers={volunteers}
+              prospects={prospects}
+              onAddVolunteer={addVolunteer}
+              onDeleteVolunteer={deleteVolunteer}
+              onAssignProspect={assignVolunteer}
+              onUnassignProspect={unassignProspect}
             />
           </div>
-        </div>
-        
-        <div className="p-4 border-t border-gray-200 text-center">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-50 border border-indigo-100 text-[10px] text-indigo-700 font-medium">
-               <i className="ph ph-lightning-fill"></i> Powered by Gemini 2.5 Flash
-            </div>
-        </div>
-      </div>
+        )}
+      </main>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col bg-gray-50 relative">
-        {/* Top Bar */}
-        <div className="h-16 border-b border-gray-200 flex items-center justify-between px-8 bg-white/95 backdrop-blur z-10">
-          <div className="flex items-center gap-4">
-             {selectedFile ? (
-               <>
-                 <span className={`w-2 h-2 rounded-full ${selectedFile.status === FileStatus.COMPLETED ? 'bg-green-500' : selectedFile.status === FileStatus.ERROR ? 'bg-red-500' : 'bg-indigo-500 animate-pulse'}`}></span>
-                 <h2 className="text-gray-900 font-medium truncate max-w-md">{selectedFile.originalName}</h2>
-               </>
-             ) : (
-                <span className="text-gray-400 text-sm">No file selected</span>
-             )}
-          </div>
-          <div className="flex gap-4">
-              <a href="https://ai.google.dev" target="_blank" rel="noreferrer" className="text-sm text-gray-500 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                 Documentation <i className="ph ph-arrow-square-out"></i>
-              </a>
-          </div>
-        </div>
-
-        {/* Main View */}
-        <div className="flex-1 p-6 overflow-hidden">
-            <MarkdownPreview file={selectedFile} />
-        </div>
+      {/* Mobile progress bar */}
+      <div className="sm:hidden h-1 bg-gray-100 flex-shrink-0">
+        <div
+          className="h-full bg-gradient-to-r from-violet-500 to-green-500 transition-all duration-500"
+          style={{ width: `${progressPct}%` }}
+        ></div>
       </div>
     </div>
   );
-};
-
-export default App;
+}
